@@ -9,6 +9,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Binder;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -54,6 +55,15 @@ public class BackgroundService extends Service implements MethodChannel.MethodCa
     private String configForegroundTypes;
     private String[] foregroundTypes;
     private Handler mainHandler;
+    
+    // Add a binder for service binding
+    private final IBinder binder = new LocalBinder();
+
+    public class LocalBinder extends Binder {
+        public BackgroundService getService() {
+            return BackgroundService.this;
+        }
+    }
 
     synchronized public static PowerManager.WakeLock getLock(Context context) {
         if (lockStatic == null) {
@@ -69,7 +79,7 @@ public class BackgroundService extends Service implements MethodChannel.MethodCa
 
     @Override
     public IBinder onBind(Intent intent) {
-        return null;
+        return binder;
     }
 
     @Override
@@ -98,8 +108,21 @@ public class BackgroundService extends Service implements MethodChannel.MethodCa
         notificationContent = config.getInitialNotificationContent();
         notificationId = config.getForegroundNotificationId();
         configForegroundTypes = config.getForegroundServiceTypes();
-        updateNotificationInfo();
+        
+        // Don't automatically update notification here
+        // We'll do it via the binding
+        
         onStartCommand(null, -1, -1);
+    }
+    
+    // Method to start foreground mode from the bound activity/service
+    public void startAsForeground() {
+        if (config.isForeground()) {
+            updateNotificationInfo();
+            if (backgroundEngine != null) {
+                backgroundEngine.getServiceControlSurface().onMoveToForeground();
+            }
+        }
     }
 
     @Override
@@ -197,7 +220,8 @@ public class BackgroundService extends Service implements MethodChannel.MethodCa
             Log.v(TAG, "Starting flutter engine for background service");
             getLock(getApplicationContext()).acquire();
 
-            updateNotificationInfo();
+            // We don't update the notification here anymore
+            // It will be done through the binding
 
             FlutterLoader flutterLoader = FlutterInjector.instance().flutterLoader();
             // initialize flutter if it's not initialized yet
