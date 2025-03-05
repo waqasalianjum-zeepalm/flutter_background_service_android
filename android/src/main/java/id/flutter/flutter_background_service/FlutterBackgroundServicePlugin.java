@@ -1,5 +1,4 @@
 package id.flutter.flutter_background_service;
-
 import android.app.ActivityManager;
 import android.content.ComponentName;
 import android.content.Context;
@@ -8,16 +7,12 @@ import android.content.ServiceConnection;
 import android.os.Handler;
 import android.os.IBinder;
 import android.util.Log;
-
 import androidx.annotation.NonNull;
 import androidx.core.content.ContextCompat;
-
 import org.json.JSONObject;
 import org.json.JSONArray;
-
 import java.util.HashMap;
 import java.util.Map;
-
 import io.flutter.embedding.engine.FlutterEngine;
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.embedding.engine.plugins.service.ServiceAware;
@@ -29,10 +24,9 @@ import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
 import io.flutter.plugin.common.MethodChannel.Result;
 import io.flutter.plugin.common.PluginRegistry.Registrar;
-
 /**
- * FlutterBackgroundServicePlugin
- */
+* FlutterBackgroundServicePlugin
+*/
 public class FlutterBackgroundServicePlugin implements FlutterPlugin, MethodCallHandler, EventChannel.StreamHandler {
     private static final String TAG = "BackgroundServicePlugin";
     private Handler mainHandler;
@@ -40,67 +34,86 @@ public class FlutterBackgroundServicePlugin implements FlutterPlugin, MethodCall
     private MethodChannel channel;
     private EventChannel eventChannel;
     private final Map<Object, EventChannel.EventSink> eventSinks = new HashMap<>();
-
     private Context context;
-
     public static final Pipe servicePipe = new Pipe();
     public static final Pipe mainPipe = new Pipe();
+    
+    // Service binding related fields
+    private BackgroundService boundService;
+    private boolean serviceBound = false;
+    
+    private final ServiceConnection serviceConnection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder service) {
+            Log.d(TAG, "Service connected");
+            if (service instanceof BackgroundService.LocalBinder) {
+                boundService = ((BackgroundService.LocalBinder) service).getService();
+                serviceBound = true;
+                // Now that we're bound, we can safely call to start foreground mode
+                if (config.isForeground()) {
+                    boundService.startAsForeground();
+                }
+            }
+        }
 
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            Log.d(TAG, "Service disconnected");
+            serviceBound = false;
+            boundService = null;
+        }
+    };
+    
     public static void registerWith(FlutterEngine engine){
         Log.d(TAG, "registering with FlutterEngine");
     }
-
+    
     private final Pipe.PipeListener listener = new Pipe.PipeListener() {
         @Override
         public void onReceived(JSONObject object) {
             receiveData(object);
         }
     };
-
+    
     @Override
     public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
         this.context = flutterPluginBinding.getApplicationContext();
         this.config = new Config(this.context);
-
         mainHandler = new Handler(context.getMainLooper());
-
         channel = new MethodChannel(flutterPluginBinding.getBinaryMessenger(), "id.flutter/background_service/android/method", JSONMethodCodec.INSTANCE);
         channel.setMethodCallHandler(this);
-
         eventChannel = new EventChannel(flutterPluginBinding.getBinaryMessenger(), "id.flutter/background_service/android/event", JSONMethodCodec.INSTANCE);
         eventChannel.setStreamHandler(this);
-
         mainPipe.addListener(listener);
     }
-
+    
     private void start() {
+        Log.d(TAG, "Starting background service...");
         try {
             WatchdogReceiver.enqueue(context);
-            boolean isForeground = config.isForeground();
+            
+            // Always start as a normal service first
             Intent intent = new Intent(context, BackgroundService.class);
-
-            if (isForeground) {
-                try {
-                    ContextCompat.startForegroundService(context, intent);
-                } catch (SecurityException e) {
-                    // Fallback to normal service if foreground permission is denied
-                    Log.w(TAG, "Failed to start foreground service: " + e.getMessage());
-                    context.startService(intent);
-                }
-            } else {
-                context.startService(intent);
-            }
+            
+            // Pass the foreground flag but don't start as foreground yet
+            intent.putExtra("foreground", config.isForeground());
+            
+            // Start as a normal service
+            context.startService(intent);
+            
+            // Bind to the service
+            context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE);
+            
         } catch (Exception e) {
             Log.e(TAG, "Error starting service: " + e.getMessage());
-            // Handle or rethrow as needed
+            Log.e(TAG, "Full stack trace: ", e);
         }
     }
-
+    
     @Override
     public void onMethodCall(@NonNull MethodCall call, @NonNull Result result) {
         String method = call.method;
         JSONObject arg = (JSONObject) call.arguments;
-
         try {
             if ("configure".equals(method)) {
                 long backgroundHandle = arg.getLong("background_handle");
@@ -123,7 +136,6 @@ public class FlutterBackgroundServicePlugin implements FlutterPlugin, MethodCall
                     }
                     foregroundServiceTypesStr = resultForegroundServiceType.toString();
                 }
-
                 config.setBackgroundHandle(backgroundHandle);
                 config.setIsForeground(isForeground);
                 config.setAutoStartOnBoot(autoStartOnBoot);
@@ -132,21 +144,17 @@ public class FlutterBackgroundServicePlugin implements FlutterPlugin, MethodCall
                 config.setNotificationChannelId(notificationChannelId);
                 config.setForegroundNotificationId(foregroundNotificationId);
                 config.setForegroundServiceTypes(foregroundServiceTypesStr);
-
                 if (autoStart) {
                     start();
                 }
-
                 result.success(true);
                 return;
             }
-
             if ("start".equals(method)) {
                 start();
                 result.success(true);
                 return;
             }
-
             if (method.equalsIgnoreCase("sendData")) {
                 synchronized (servicePipe){
                     if (servicePipe.hasListener()){
@@ -154,23 +162,20 @@ public class FlutterBackgroundServicePlugin implements FlutterPlugin, MethodCall
                         result.success(true);
                         return;
                     }
-
                     result.success(false);
                 }
                 return;
             }
-
             if (method.equalsIgnoreCase("isServiceRunning")) {
                 result.success(isServiceRunning());
                 return;
             }
-
             result.notImplemented();
         } catch (Exception e) {
             result.error("100", "Failed while read arguments", e.getMessage());
         }
     }
-
+    
     private boolean isServiceRunning() {
         ActivityManager manager = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
         for (ActivityManager.RunningServiceInfo service : manager.getRunningServices(Integer.MAX_VALUE)) {
@@ -180,21 +185,26 @@ public class FlutterBackgroundServicePlugin implements FlutterPlugin, MethodCall
         }
         return false;
     }
-
+    
     @Override
     public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
         mainPipe.removeListener(listener);
-
         channel.setMethodCallHandler(null);
         channel = null;
-
+        
+        // Unbind from the service if we're bound
+        if (serviceBound && context != null) {
+            context.unbindService(serviceConnection);
+            serviceBound = false;
+        }
+        
         synchronized (eventSinks){
             eventSinks.clear();
         }
         eventChannel.setStreamHandler(null);
         eventChannel = null;
     }
-
+    
     private void receiveData(JSONObject data) {
         final JSONObject arg = data;
         synchronized (this){
@@ -209,14 +219,14 @@ public class FlutterBackgroundServicePlugin implements FlutterPlugin, MethodCall
             }
         }
     }
-
+    
     @Override
     public void onListen(Object arguments, EventChannel.EventSink events) {
         synchronized (this){
             eventSinks.put(arguments, events);
         }
     }
-
+    
     @Override
     public void onCancel(Object arguments) {
         synchronized (this){
